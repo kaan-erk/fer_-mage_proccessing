@@ -2,6 +2,7 @@ import cv2
 import os
 from ultralytics import YOLO
 import numpy as np
+from collections import deque
 
 def get_latest_model(runs_dir="runs/classify", base_model="yolov8n-cls.pt"):
     """En son eğitilmiş modeli bulur"""
@@ -43,8 +44,12 @@ def main():
     # (YOLOv8-cls tüm resmi sınıflandırır. Doğru yapmak için sadece yüzü yakalayıp modele vermeliyiz)
     face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
 
-    # 3. Web kamerasını başlat (0 numaralı indeks genellikle bilgisayarın ana kamerasıdır)
-    cap = cv2.VideoCapture(0)
+    # 3. Kamerayı başlat (0 numaralı indeks genellikle bilgisayarın ana kamerasıdır)
+    cap = cv2.VideoCapture(1)
+    
+    # Temporal Smoothing (Zaman Serisi Yumuşatması) için kuyruk
+    # Son 3 tahmini saklayarak ani değişimleri engelleriz (Daha hızlı tepki için 3'e düşürüldü)
+    emotion_history = deque(maxlen=3)
     
     if not cap.isOpened():
         print("Hata: Kamera açılamadı!")
@@ -72,6 +77,16 @@ def main():
             # 1. Yüzü asıl görüntüden kes
             face_img = frame[y:y+h, x:x+w]
             
+            # CLAHE Uygulama (Kontrast artırarak mikro ifadeleri netleştirir)
+            if face_img.size > 0:
+                # Gri tona çevir
+                face_gray = cv2.cvtColor(face_img, cv2.COLOR_BGR2GRAY)
+                # CLAHE objesi oluştur
+                clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+                face_gray_clahe = clahe.apply(face_gray)
+                # Tekrar BGR'ye çevir (YOLO BGR/RGB bekler)
+                face_img = cv2.cvtColor(face_gray_clahe, cv2.COLOR_GRAY2BGR)
+            
             # 2. YOLO'ya modeli tahmin ettir (Verbose=False yaparak terminalin yazıyla dolmasını engelliyoruz)
             results = model.predict(source=face_img, imgsz=48, verbose=False)
             
@@ -81,12 +96,25 @@ def main():
             emotion = results[0].names[best_class_index]
             confidence = probs.top1conf.item() * 100
 
+            # Temporal Smoothing Uygula
+            emotion_history.append(emotion)
+            
+            # Ağırlıklı Oylama (Angry ve Sad duygularına pozitif ayrımcılık)
+            emotion_counts = {}
+            for e in emotion_history:
+                # Angry ve Sad için ağırlık 1.5, diğerleri için 1.0
+                weight = 1.5 if e in ['angry', 'sad'] else 1.0
+                emotion_counts[e] = emotion_counts.get(e, 0) + weight
+            
+            # En yüksek ağırlığa sahip duyguyu seç
+            smoothed_emotion = max(emotion_counts, key=emotion_counts.get)
+
             # 4. Yüzün etrafına bir dikdörtgen çiz ve tahmin edilen duyguyu yaz
             color = (0, 255, 0) # Yeşil Klasik Renk
             cv2.rectangle(frame, (x, y), (x+w, y+h), color, 2)
             
             # Yazı metni (Örn: "happy: 95.5%")
-            text = f"{emotion} (%{confidence:.1f})"
+            text = f"{smoothed_emotion} (%{confidence:.1f})"
             
             # Yazının daha okunabilir olması için arka plan siyah bant çizimi
             cv2.rectangle(frame, (x, y-35), (x+w, y), color, cv2.FILLED)
